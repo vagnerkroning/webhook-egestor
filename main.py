@@ -65,12 +65,12 @@ def get_access_token():
     return token
 
 
-def buscar_produto(codigo):
+def api_get(endpoint):
     access_token = get_access_token()
     if not access_token:
         return None
 
-    url = f"https://api.egestor.com.br/api/v1/produtos/{codigo}"
+    url = f"https://api.egestor.com.br/api/v1/{endpoint}"
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Accept": "application/json"
@@ -81,8 +81,16 @@ def buscar_produto(codigo):
     if response.status_code == 200:
         return response.json()
 
-    log(f"❌ erro ao buscar produto {response.status_code} | {response.text}")
+    log(f"❌ erro ao buscar {endpoint} | {response.status_code} | {response.text}")
     return None
+
+
+def buscar_produto(codigo):
+    return api_get(f"produtos/{codigo}")
+
+
+def buscar_venda(codigo):
+    return api_get(f"vendas/{codigo}")
 
 
 def salvar_produto_final(produto):
@@ -105,6 +113,83 @@ def salvar_produto_final(produto):
     ).execute()
 
     log("✅ SALVO PRODUTO COMPLETO EM eg_produtos")
+
+
+def salvar_venda_final(venda):
+    registro = {
+        "id_origem": to_str(venda.get("codigo") or venda.get("id")),
+        "data_venda": to_str(venda.get("dtVenda"))[:10] if venda.get("dtVenda") else None,
+        "numero": to_str(venda.get("numDoc") or venda.get("numero")),
+        "cliente_id": to_str(venda.get("codContato")),
+        "cliente_nome": venda.get("nomeContato") or venda.get("cliente_nome") or "Cliente não identificado",
+        "valor_total": to_float(venda.get("valorTotal") or venda.get("valor_total") or venda.get("valor")),
+        "desconto": to_float(venda.get("desconto")),
+        "acrescimo": to_float(venda.get("acrescimo")),
+        "situacao": to_str(venda.get("situacao") or "OK"),
+        "forma_pagamento": to_str(venda.get("nomeFormaPgto") or venda.get("forma_pagamento")),
+    }
+
+    supabase.table("eg_vendas").upsert(
+        registro,
+        on_conflict="id_origem"
+    ).execute()
+
+    log("✅ SALVO VENDA COMPLETA EM eg_vendas")
+
+
+def buscar_categoria_nome(cod_categoria):
+    if cod_categoria is None or cod_categoria == "":
+        return None
+
+    resp = api_get(f"categorias/{cod_categoria}")
+    if not resp:
+        return None
+
+    return resp.get("nome") or resp.get("descricao")
+
+
+def salvar_itens_venda(venda):
+    venda_id = to_str(venda.get("codigo") or venda.get("id"))
+    itens = venda.get("produtos") or []
+
+    if not itens:
+        log("⚠️ venda sem itens")
+        return
+
+    for item in itens:
+        produto_id = to_str(item.get("codProduto"))
+        quantidade = to_float(item.get("quant") or item.get("quantidade"))
+        valor_unitario = to_float(item.get("preco") or item.get("valorUnitario"))
+        item_id = to_str(item.get("codigo") or f"{venda_id}_{produto_id}")
+
+        # opcional: tenta enriquecer categoria pelo produto
+        categoria_id = None
+        categoria_nome = None
+
+        if produto_id:
+            produto = buscar_produto(produto_id)
+            if produto:
+                categoria_id = to_str(produto.get("codCategoria"))
+                categoria_nome = buscar_categoria_nome(categoria_id)
+
+        registro = {
+            "id_origem": item_id,
+            "venda_id": venda_id,
+            "produto_id": produto_id,
+            "produto_nome": item.get("descricao"),
+            "categoria_id": categoria_id,
+            "categoria_nome": categoria_nome,
+            "quantidade": quantidade,
+            "valor_unitario": valor_unitario,
+            "valor_total": quantidade * valor_unitario,
+        }
+
+        supabase.table("eg_venda_itens").upsert(
+            registro,
+            on_conflict="id_origem"
+        ).execute()
+
+    log("✅ SALVOS ITENS DA VENDA EM eg_venda_itens")
 
 
 @app.get("/")
@@ -146,7 +231,18 @@ async def webhook(request: Request):
                 "dados": data,
                 "action": action
             }).execute()
+
             log("✅ SALVO NA TABELA eg_webhook_vendas")
+
+            if codigo:
+                venda = buscar_venda(codigo)
+
+                if venda:
+                    log(f"🔥 VENDA COMPLETA: {venda}")
+                    salvar_venda_final(venda)
+                    salvar_itens_venda(venda)
+                else:
+                    log("⚠️ não foi possível buscar venda completa")
 
         elif module in ["financeiro", "financeiros"]:
             supabase.table("eg_webhook_financeiros").insert({
