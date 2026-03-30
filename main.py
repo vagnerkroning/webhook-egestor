@@ -4,6 +4,8 @@ import requests
 import os
 from datetime import datetime
 
+print("🔥 main.py carregou", flush=True)
+
 app = FastAPI()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -75,6 +77,7 @@ def home():
 
 @app.post("/webhook-egestor")
 async def webhook(request: Request):
+    print("🔥 entrou no webhook", flush=True)
     data = await request.json()
 
     log(f"📩 RECEBIDO: {data}")
