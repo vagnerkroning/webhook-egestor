@@ -5,17 +5,16 @@ import os
 
 app = FastAPI()
 
-# 🔑 ENV (coloca no Railway depois)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 EGESTOR_TOKEN = os.getenv("EGESTOR_TOKEN")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# 🔥 função pra buscar produto completo
+
 def buscar_produto(codigo):
     url = f"https://api.egestor.com.br/api/v1/produtos/{codigo}"
-    
+
     headers = {
         "Authorization": f"Bearer {EGESTOR_TOKEN}",
         "Accept": "application/json"
@@ -36,12 +35,12 @@ async def webhook(request: Request):
 
     print("📩 RECEBIDO:", data)
 
-    # salva bruto
+    # ✅ AGORA CORRETO
     supabase.table("eg_webhook_produtos").insert({
-        "payload": data
+        "dados": data,
+        "action": data.get("action")
     }).execute()
 
-    # 🔥 se for produto
     if data.get("module") == "produtos":
         codigo = data.get("codigo")
 
