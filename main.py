@@ -8,12 +8,6 @@ print("🔥 main.py carregou", flush=True)
 
 app = FastAPI()
 
-@app.middleware("http")
-async def log_request(request, call_next):
-    print(f"🌐 REQUEST {request.method} {request.url.path}", flush=True)
-    response = await call_next(request)
-    return response
-
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 EGESTOR_TOKEN = os.getenv("EGESTOR_TOKEN")  # personal token
@@ -30,6 +24,21 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def to_float(valor, padrao=0.0):
+    try:
+        if valor is None or valor == "":
+            return padrao
+        return float(valor)
+    except Exception:
+        return padrao
+
+
+def to_str(valor, padrao=""):
+    if valor is None:
+        return padrao
+    return str(valor)
 
 
 def get_access_token():
@@ -76,6 +85,28 @@ def buscar_produto(codigo):
     return None
 
 
+def salvar_produto_final(produto):
+    registro = {
+        "id_origem": to_str(produto.get("codigo")),
+        "codigo": to_str(produto.get("codigo")),
+        "nome": produto.get("descricao"),
+        "categoria_id": to_str(produto.get("codCategoria")),
+        "categoria_nome": None,
+        "unidade": produto.get("unidadeTributada"),
+        "valor_venda": to_float(produto.get("precoVenda")),
+        "custo": to_float(produto.get("precoCusto")),
+        "estoque": to_float(produto.get("estoque")),
+        "situacao": "OK",
+    }
+
+    supabase.table("eg_produtos").upsert(
+        registro,
+        on_conflict="id_origem"
+    ).execute()
+
+    log("✅ SALVO PRODUTO COMPLETO EM eg_produtos")
+
+
 @app.get("/")
 def home():
     return {"status": "ok"}
@@ -106,20 +137,7 @@ async def webhook(request: Request):
 
                 if produto:
                     log(f"🔥 PRODUTO COMPLETO: {produto}")
-
-                    produto_tratado = {
-                        "id": str(produto.get("codigo")),
-                        "nome": produto.get("descricao"),
-                        "codigo": str(produto.get("codigo")),
-                        "preco": produto.get("precoVenda"),
-                        "custo": produto.get("precoCusto"),
-                        "categoria": str(produto.get("codCategoria")) if produto.get("codCategoria") is not None else None,
-                        "updated_at": produto.get("updatedAt")
-                    }
-
-                    supabase.table("eg_produtos").upsert(produto_tratado).execute()
-
-                    log("✅ SALVO PRODUTO COMPLETO")
+                    salvar_produto_final(produto)
                 else:
                     log("⚠️ não foi possível buscar produto completo")
 
