@@ -8,9 +8,15 @@ print("🔥 main.py carregou", flush=True)
 
 app = FastAPI()
 
+@app.middleware("http")
+async def log_request(request, call_next):
+    print(f"🌐 REQUEST {request.method} {request.url.path}", flush=True)
+    response = await call_next(request)
+    return response
+
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-EGESTOR_TOKEN = os.getenv("EGESTOR_TOKEN")  # aqui é o PERSONAL TOKEN
+EGESTOR_TOKEN = os.getenv("EGESTOR_TOKEN")  # personal token
 
 if not SUPABASE_URL:
     raise ValueError("SUPABASE_URL não definida")
@@ -101,7 +107,17 @@ async def webhook(request: Request):
                 if produto:
                     log(f"🔥 PRODUTO COMPLETO: {produto}")
 
-                    supabase.table("eg_produtos").upsert(produto).execute()
+                    produto_tratado = {
+                        "id": str(produto.get("codigo")),
+                        "nome": produto.get("descricao"),
+                        "codigo": str(produto.get("codigo")),
+                        "preco": produto.get("precoVenda"),
+                        "custo": produto.get("precoCusto"),
+                        "categoria": str(produto.get("codCategoria")) if produto.get("codCategoria") is not None else None,
+                        "updated_at": produto.get("updatedAt")
+                    }
+
+                    supabase.table("eg_produtos").upsert(produto_tratado).execute()
 
                     log("✅ SALVO PRODUTO COMPLETO")
                 else:
