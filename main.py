@@ -11,10 +11,8 @@ EGESTOR_TOKEN = os.getenv("EGESTOR_TOKEN")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-
 def buscar_produto(codigo):
     url = f"https://api.egestor.com.br/api/v1/produtos/{codigo}"
-
     headers = {
         "Authorization": f"Bearer {EGESTOR_TOKEN}",
         "Accept": "application/json"
@@ -28,14 +26,12 @@ def buscar_produto(codigo):
         print("❌ erro ao buscar produto", response.text)
         return None
 
-
 @app.post("/webhook-egestor")
 async def webhook(request: Request):
     data = await request.json()
 
     print("📩 RECEBIDO:", data)
 
-    # ✅ AGORA CORRETO
     supabase.table("eg_webhook_produtos").insert({
         "dados": data,
         "action": data.get("action")
@@ -49,9 +45,6 @@ async def webhook(request: Request):
 
             if produto:
                 print("🔥 PRODUTO COMPLETO:", produto)
-
-                supabase.table("eg_produtos").upsert(produto).execute()
-
                 print("✅ SALVO PRODUTO COMPLETO")
 
     return {"status": "ok"}
