@@ -93,6 +93,34 @@ def buscar_venda(codigo):
     return api_get(f"vendas/{codigo}")
 
 
+def buscar_financeiro(codigo):
+    """
+    Tenta primeiro recebimentos, depois pagamentos.
+    Retorna (tipo, detalhe)
+    tipo = 'recebimento' ou 'pagamento'
+    """
+    receb = api_get(f"recebimentos/{codigo}")
+    if receb:
+        return "recebimento", receb
+
+    pag = api_get(f"pagamentos/{codigo}")
+    if pag:
+        return "pagamento", pag
+
+    return None, None
+
+
+def buscar_plano_conta_nome(codigo):
+    if not codigo:
+        return ""
+
+    detalhe = api_get(f"planoContas/{codigo}")
+    if not detalhe:
+        return ""
+
+    return detalhe.get("nome", "")
+
+
 def salvar_produto_final(produto):
     registro = {
         "id_origem": to_str(produto.get("codigo")),
@@ -162,7 +190,6 @@ def salvar_itens_venda(venda):
         valor_unitario = to_float(item.get("preco") or item.get("valorUnitario"))
         item_id = to_str(item.get("codigo") or f"{venda_id}_{produto_id}")
 
-        # opcional: tenta enriquecer categoria pelo produto
         categoria_id = None
         categoria_nome = None
 
@@ -190,6 +217,49 @@ def salvar_itens_venda(venda):
         ).execute()
 
     log("✅ SALVOS ITENS DA VENDA EM eg_venda_itens")
+
+
+def salvar_financeiro_final(tipo, fin):
+    codigo = to_str(fin.get("codigo") or fin.get("id"))
+    data = to_str(
+        fin.get("dtVenc")
+        or fin.get("dtRec")
+        or fin.get("dtPgto")
+        or fin.get("data")
+    )[:10]
+
+    plano_conta_id = to_str(fin.get("codPlanoContas"))
+    plano_conta_nome = buscar_plano_conta_nome(plano_conta_id)
+
+    registro = {
+        "id_origem": codigo,
+        "data": data,
+        "contato_id": to_str(fin.get("codContato")),
+        "contato_nome": (
+            fin.get("nomeContato")
+            or fin.get("contatoNome")
+            or "Não identificado"
+        ),
+        "plano_conta_id": plano_conta_id,
+        "plano_conta_nome": plano_conta_nome,
+        "valor": to_float(fin.get("valor")),
+        "situacao": to_str(fin.get("situacao")),
+        "origem": tipo,
+    }
+
+    if tipo == "recebimento":
+        supabase.table("eg_recebimentos").upsert(
+            registro,
+            on_conflict="id_origem"
+        ).execute()
+        log("✅ SALVO FINANCEIRO EM eg_recebimentos")
+
+    elif tipo == "pagamento":
+        supabase.table("eg_pagamentos").upsert(
+            registro,
+            on_conflict="id_origem"
+        ).execute()
+        log("✅ SALVO FINANCEIRO EM eg_pagamentos")
 
 
 @app.get("/")
@@ -250,6 +320,15 @@ async def webhook(request: Request):
                 "action": action
             }).execute()
             log("✅ SALVO NA TABELA eg_webhook_financeiros")
+
+            if codigo:
+                tipo, fin = buscar_financeiro(codigo)
+
+                if fin:
+                    log(f"🔥 FINANCEIRO COMPLETO ({tipo}): {fin}")
+                    salvar_financeiro_final(tipo, fin)
+                else:
+                    log("⚠️ não foi possível buscar financeiro completo")
 
         else:
             supabase.table("eg_webhook_logs").insert({
