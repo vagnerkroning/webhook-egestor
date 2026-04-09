@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request
 from supabase import create_client
 import requests
 import os
+import time
 from datetime import datetime
 
 print("🔥 main.py carregou", flush=True)
@@ -49,7 +50,11 @@ def get_access_token():
         "personal_token": EGESTOR_TOKEN
     }
 
-    r = requests.post(url, json=payload, timeout=60)
+    try:
+        r = requests.post(url, json=payload, timeout=60)
+    except Exception as e:
+        log(f"❌ erro auth eGestor (conexão): {str(e)}")
+        return None
 
     if r.status_code != 200:
         log(f"❌ erro auth eGestor: {r.status_code} | {r.text}")
@@ -65,23 +70,44 @@ def get_access_token():
     return token
 
 
-def api_get(endpoint):
-    access_token = get_access_token()
-    if not access_token:
+def api_get(endpoint, tentativas=4):
+    for tentativa in range(1, tentativas + 1):
+        access_token = get_access_token()
+        if not access_token:
+            log(f"❌ sem access_token para {endpoint}")
+            return None
+
+        url = f"https://api.egestor.com.br/api/v1/{endpoint}"
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json"
+        }
+
+        try:
+            response = requests.get(url, headers=headers, timeout=60)
+        except Exception as e:
+            log(f"❌ erro de conexão em {endpoint} | tentativa {tentativa}/{tentativas} | {str(e)}")
+            if tentativa < tentativas:
+                time.sleep(tentativa * 2)
+            continue
+
+        if response.status_code == 200:
+            return response.json()
+
+        if response.status_code == 429:
+            espera = tentativa * 3
+            log(f"⚠️ limite da API em {endpoint} | 429 | tentativa {tentativa}/{tentativas} | aguardando {espera}s")
+            time.sleep(espera)
+            continue
+
+        if response.status_code in [404, 410]:
+            log(f"⚠️ {endpoint} não encontrado | {response.status_code} | {response.text}")
+            return None
+
+        log(f"❌ erro ao buscar {endpoint} | {response.status_code} | {response.text}")
         return None
 
-    url = f"https://api.egestor.com.br/api/v1/{endpoint}"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "application/json"
-    }
-
-    response = requests.get(url, headers=headers, timeout=60)
-
-    if response.status_code == 200:
-        return response.json()
-
-    log(f"❌ erro ao buscar {endpoint} | {response.status_code} | {response.text}")
+    log(f"❌ falha final ao buscar {endpoint} após {tentativas} tentativas")
     return None
 
 
@@ -121,13 +147,41 @@ def buscar_plano_conta_nome(codigo):
     return detalhe.get("nome", "")
 
 
+def buscar_categoria_nome(cod_categoria):
+    if cod_categoria is None or cod_categoria == "":
+        return None
+
+    resp = api_get(f"categorias/{cod_categoria}")
+    if not resp:
+        return None
+
+    return resp.get("nome") or resp.get("descricao")
+
+
+def salvar_pendencia(tipo, codigo, payload=None, motivo=""):
+    try:
+        supabase.table("eg_webhook_pendencias").insert({
+            "tipo": tipo,
+            "codigo": to_str(codigo),
+            "motivo": motivo,
+            "dados": payload or {},
+            "created_at_manual": datetime.now().isoformat()
+        }).execute()
+        log(f"📝 pendência salva | tipo={tipo} | codigo={codigo} | motivo={motivo}")
+    except Exception as e:
+        log(f"❌ erro ao salvar pendência {tipo}/{codigo}: {str(e)}")
+
+
 def salvar_produto_final(produto):
+    categoria_id = to_str(produto.get("codCategoria"))
+    categoria_nome = buscar_categoria_nome(categoria_id) if categoria_id else None
+
     registro = {
         "id_origem": to_str(produto.get("codigo")),
         "codigo": to_str(produto.get("codigo")),
         "nome": produto.get("descricao"),
-        "categoria_id": to_str(produto.get("codCategoria")),
-        "categoria_nome": None,
+        "categoria_id": categoria_id,
+        "categoria_nome": categoria_nome if categoria_nome else "MERCADO",
         "unidade": produto.get("unidadeTributada"),
         "valor_venda": to_float(produto.get("precoVenda")),
         "custo": to_float(produto.get("precoCusto")),
@@ -165,17 +219,6 @@ def salvar_venda_final(venda):
     log("✅ SALVO VENDA COMPLETA EM eg_vendas")
 
 
-def buscar_categoria_nome(cod_categoria):
-    if cod_categoria is None or cod_categoria == "":
-        return None
-
-    resp = api_get(f"categorias/{cod_categoria}")
-    if not resp:
-        return None
-
-    return resp.get("nome") or resp.get("descricao")
-
-
 def salvar_itens_venda(venda):
     venda_id = to_str(venda.get("codigo") or venda.get("id"))
     itens = venda.get("produtos") or []
@@ -205,7 +248,7 @@ def salvar_itens_venda(venda):
             "produto_id": produto_id,
             "produto_nome": item.get("descricao"),
             "categoria_id": categoria_id,
-            "categoria_nome": categoria_nome,
+            "categoria_nome": categoria_nome if categoria_nome else "MERCADO",
             "quantidade": quantidade,
             "valor_unitario": valor_unitario,
             "valor_total": quantidade * valor_unitario,
@@ -262,6 +305,40 @@ def salvar_financeiro_final(tipo, fin):
         log("✅ SALVO FINANCEIRO EM eg_pagamentos")
 
 
+def processar_produto_com_retry(codigo, payload=None):
+    produto = buscar_produto(codigo)
+
+    if produto:
+        log(f"🔥 PRODUTO COMPLETO: {produto}")
+        salvar_produto_final(produto)
+        return True
+
+    salvar_pendencia(
+        tipo="produto",
+        codigo=codigo,
+        payload=payload,
+        motivo="falha ao buscar produto completo"
+    )
+    return False
+
+
+def processar_financeiro_com_retry(codigo, payload=None):
+    tipo, fin = buscar_financeiro(codigo)
+
+    if fin:
+        log(f"🔥 FINANCEIRO COMPLETO ({tipo}): {fin}")
+        salvar_financeiro_final(tipo, fin)
+        return True
+
+    salvar_pendencia(
+        tipo="financeiro",
+        codigo=codigo,
+        payload=payload,
+        motivo="não encontrado em recebimentos nem pagamentos"
+    )
+    return False
+
+
 @app.get("/")
 def home():
     return {"status": "ok"}
@@ -288,12 +365,8 @@ async def webhook(request: Request):
             log("✅ SALVO NA TABELA eg_webhook_produtos")
 
             if codigo:
-                produto = buscar_produto(codigo)
-
-                if produto:
-                    log(f"🔥 PRODUTO COMPLETO: {produto}")
-                    salvar_produto_final(produto)
-                else:
+                ok = processar_produto_com_retry(codigo, payload=data)
+                if not ok:
                     log("⚠️ não foi possível buscar produto completo")
 
         elif module == "vendas":
@@ -312,6 +385,12 @@ async def webhook(request: Request):
                     salvar_venda_final(venda)
                     salvar_itens_venda(venda)
                 else:
+                    salvar_pendencia(
+                        tipo="venda",
+                        codigo=codigo,
+                        payload=data,
+                        motivo="falha ao buscar venda completa"
+                    )
                     log("⚠️ não foi possível buscar venda completa")
 
         elif module in ["financeiro", "financeiros"]:
@@ -322,12 +401,8 @@ async def webhook(request: Request):
             log("✅ SALVO NA TABELA eg_webhook_financeiros")
 
             if codigo:
-                tipo, fin = buscar_financeiro(codigo)
-
-                if fin:
-                    log(f"🔥 FINANCEIRO COMPLETO ({tipo}): {fin}")
-                    salvar_financeiro_final(tipo, fin)
-                else:
+                ok = processar_financeiro_com_retry(codigo, payload=data)
+                if not ok:
                     log("⚠️ não foi possível buscar financeiro completo")
 
         else:
@@ -339,5 +414,11 @@ async def webhook(request: Request):
 
     except Exception as e:
         log(f"❌ erro no webhook: {str(e)}")
+        salvar_pendencia(
+            tipo=module or "desconhecido",
+            codigo=codigo,
+            payload=data,
+            motivo=f"erro no webhook: {str(e)}"
+        )
 
     return {"status": "ok"}
